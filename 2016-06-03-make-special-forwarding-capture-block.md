@@ -48,7 +48,7 @@ NSBlockInvocation 是一个精简的 NSInvocation，只是用来传递输入参�
 
 ## 实现原理
 
-反编译 CoreFoundation 的 x86_64 版本可得到：
+反编译 CoreFoundation 的 x86_64 版本可得到：[更可读](https://www.hopperapp.com)
 
 ```c
 int ___NSMakeSpecialForwardingCaptureBlock(int arg0, int arg1, int arg2, int arg3, int arg4, int arg5) {
@@ -181,12 +181,12 @@ void ___block_forwarding___(int arg0) {
 
 注2：这个偏移是 invoke 指针，即 capture block 跳转到 handler。
 
-其中的核心代码，利用参数 signature 和所有寄存器组成的 frame 内容，构造一个 NSBlockInvocation 对象。
+它的核心任务是构造一个 NSBlockInvocation 对象，然后执行 handler。
 
 
 #### PS1 参数的顺序
 
-[Let's Build NSInvocation, Part I](https://www.mikeash.com/pyblog/friday-qa-2013-03-08-lets-build-nsinvocation-part-i.html)
+参考：[Let's Build NSInvocation, Part I](https://www.mikeash.com/pyblog/friday-qa-2013-03-08-lets-build-nsinvocation-part-i.html)
 
 `rdi, rsi, rdx, rcx, r8, r9, (rsp), (rsp+0x8), (rsp+0x10), ...`
 
@@ -197,7 +197,21 @@ void ___block_forwarding___(int arg0) {
 
 #### PS3
 
-[Block 的结构](https://clang.llvm.org/docs/Block-ABI-Apple.html)
+一开始无法识别 __NSMakeSpecialForwardingCaptureBlock 的第二个参数是一个 block 时，可自定义成一个 struct 指针，慢慢推导其字段：
+
+```
+struct closure {
+    void *a;  // 4 or 8
+    long long b;   // 8
+    void *fp;
+} *st;
+```
+
+32 位模拟器、arm offset 12 字节。64 位模拟器、arm offset 16 字节。 利用 `void *, long` 等的可变长度的特性，使用一份定义代码（不使用宏）。
+
+最终发现这个 struct 就是一个 block。
+
+参考：[Block 的结构](https://clang.llvm.org/docs/Block-ABI-Apple.html)
 
 ```c
 struct {
@@ -207,4 +221,4 @@ struct {
   void *invoke;  // 32: 0xc, 64: 0x10
 }
 ```
-32 位模拟器、arm offset 12 字节。64 位模拟器、arm offset 16 字节。 
+
