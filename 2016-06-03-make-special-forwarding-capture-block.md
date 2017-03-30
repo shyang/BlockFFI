@@ -1,10 +1,85 @@
 ---
 layout: post
-title: __NSMakeSpecialForwardingCaptureBlock()
+title: "libffi and __NSMakeSpecialForwardingCaptureBlock"
 ---
 
-## 概述
-__NSMakeSpecialForwardingCaptureBlock 是一个私有函数，代码在 CoreFoundation 之中：
+## 问题
+Q: Objective-C 中能否动态创建任意一个 block 对象？^注1
+
+> 答案并不是简单的 `id block = ^{ ... };`，因为这种方式实际是静态的，编译完后这段代码只能生成一种 block，并不能生成各种参数与返回类型的其它 block。
+>
+> 注1: 不考虑 variadic functions（类似 printf) 的情形
+
+实际需要的类似：
+
+`id CreateBlock(int numOfArguments, int typeOfArguments[], int returnType, void (*functionPtr)());`
+
+`numOfArguments`, `typeOfArguments`, `returnType` 都是动态描述这个 block 的签名 signature，`functionPtr` 是一个 callback，用于执行真正的工作。返回的 id 是一个 block 对象，可强转成各种类型的 block 使用。
+
+
+## 方案1
+
+动态的解析各种参数实际需要汇编级别操作各个寄存器，较复杂，简单起见可利用现成的 [libffi](https://github.com/libffi/libffi)，无完整 demo，主要代码如下：
+
+```objc
+// http://clang.llvm.org/docs/Block-ABI-Apple.html
+struct Block {
+    void *isa;
+    int flags;
+    int reserved;
+    void *invoke;
+};
+
+static void SetBlockImplementation(id block, void *codePtr) {
+    ((struct Block *)block)->invoke = codePtr;
+}
+
+static void Callback(ffi_cif *cif, void *ret, void **args, void *user_data) {
+    // 此处实现 callback 逻辑，所有 block 都会回调到这里
+}
+
+id CreateBlock(...) {
+    // 根据输入参数，填充 libffi 所需要的 nargs, args 等等（略）
+
+    void *codePtr;
+    int nargs;
+    void *user_data; // 可用于传递 self 等
+
+    ffi_closure *closure;
+    ffi_cif *cif; // call interface
+    ffi_type **args;
+    ffi_type *ret;
+
+    cif = malloc(sizeof(*cif));
+    ffi_prep_cif(cif, FFI_DEFAULT_ABI, nargs, ret, args);
+
+    closure = ffi_closure_alloc(sizeof(*closure), &codePtr);
+    ffi_prep_closure_loc(closure, cif, Callback, user_data, codePtr);
+
+    id block = ^{
+        assert(0); // should never reach here ^注1
+
+        // pass some references into the block as upvalues
+        // which will be removed when this block dealloc's
+        [aLocalObject anyMessage]; // ^注2
+    };
+    SetBlockImplementation(block, codePtr); // ^注2
+    return block;
+}
+```
+
+原理是：
+
+1. libffi 能够动态创建符合 signature 任意 function。（并没有使用可写可执行内存，可在 iOS 上运行）
+2. 将此 funtionPtr 强行替换到一个 block 对象中的 invoke 指针。
+3. 返回该对象即可满足要求。
+
+> 注1: 此 block 内部的 invoke 指针会被替换，其原有代码不会被执行。如果被 assert，说明未替换成功。
+>
+> 注2: 虽然其原有代码不会被执行，但 retain 的逻辑编译器还是会处理，故可以利用这点将一些局部对象的生命周期绑定到这个 block 上。
+
+## 方案2
+使用 __NSMakeSpecialForwardingCaptureBlock，一个 CoreFoundation 中的私有函数：
 
 ```console
 $ nm /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation | grep NSMakeSpecialForwardingCaptureBlock
@@ -14,9 +89,10 @@ $ nm /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platfo
 
 它能够动态创建一个 capture block，所有对该 capture block 的调用，都将被包装成一个 NSInvocation 对象，供一个统一的 handler 解析：
 
+严格地说也不是私有，只需要添加一下它的声明即可使用：
 `id __NSMakeSpecialForwardingCaptureBlock(const char *signature, void (^handler)(NSInvocation *inv));`
 
-## 示例
+### 示例
 只适用于 64 位机器，因为 `"v@?@Q^B"` 是 64 位专用的。32 位下该 block 的 signature 需修改为 `v@?@I^c`
 
 ```c
@@ -31,7 +107,7 @@ id proxy = __NSMakeSpecialForwardingCaptureBlock("v@?@Q^B", ^(NSInvocation *inv)
 });
 NSArray *arr = @[@"a", @"b", @"c"];
 [arr enumerateObjectsUsingBlock:proxy];
-    
+
 ```
 log 输出的是：
 
@@ -46,7 +122,7 @@ log 输出的是：
 NSBlockInvocation 是一个精简的 NSInvocation，只是用来传递输入参数与返回值。
 
 
-## 实现原理
+### 实现原理
 
 反编译 CoreFoundation 的 x86_64 版本可得到：[更可读](https://www.hopperapp.com)
 
@@ -136,9 +212,9 @@ loc_bb646:
 00000000000bb6cc         call       ___block_forwarding___
 00000000000bb6d1         mov        rsp, rbp
 00000000000bb6d4         pop        rbp
-00000000000bb6d5         ret        
+00000000000bb6d5         ret
                         ; endp
-00000000000bb6d6         nop        
+00000000000bb6d6         nop
 00000000000bb6d7         nop        word [ds:rax+rax]
 ```
 
