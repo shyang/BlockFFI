@@ -14,7 +14,7 @@ Q: Objective-C 中能否动态创建任意一个 block 对象？^注1
 
 `id CreateBlock(int numOfArguments, int typeOfArguments[], int returnType, void (*functionPtr)());`
 
-`numOfArguments`, `typeOfArguments`, `returnType` 都是动态描述这个 block 的签名 signature，`functionPtr` 是一个 callback，用于执行真正的工作。返回的 id 是一个 block 对象，可强转成各种类型的 block 使用。
+`numOfArguments`, `typeOfArguments`, `returnType` 都是动态描述这个 block 的签名 signature，`functionPtr` 是一个 callback，用于执行真正的工作。返回的 id 是一个 block 对象，可强转(cast)成各种类型 的 block 使用。
 
 
 ## 方案1
@@ -72,7 +72,7 @@ id CreateBlock(...) {
 
 1. libffi 能够动态创建符合 signature 任意 function。（并没有使用可写可执行内存，可在 iOS 上运行）
 2. 将此 funtionPtr 强行替换到一个 block 对象中的 invoke 指针。
-3. 返回该对象即可满足要求。
+3. 返回该 block 对象即可满足要求。
 
 > 注1: 此 block 内部的 invoke 指针会被替换，其原有代码不会被执行。如果被 assert，说明未替换成功。
 >
@@ -90,7 +90,9 @@ $ nm /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platfo
 它能够动态创建一个 capture block，所有对该 capture block 的调用，都将被包装成一个 NSInvocation 对象，供一个统一的 handler 解析：
 
 严格地说也不是私有，只需要添加一下它的声明即可使用：
-`id __NSMakeSpecialForwardingCaptureBlock(const char *signature, void (^handler)(NSInvocation *inv));`
+```
+id __NSMakeSpecialForwardingCaptureBlock(const char *signature, void (^handler)(NSInvocation *inv));
+```
 
 ### 示例
 只适用于 64 位机器，因为 `"v@?@Q^B"` 是 64 位专用的。32 位下该 block 的 signature 需修改为 `v@?@I^c`
@@ -121,8 +123,11 @@ log 输出的是：
 
 NSBlockInvocation 是一个精简的 NSInvocation，只是用来传递输入参数与返回值。
 
+对比方案1，简洁非常多，可适用于 Mac/iOS (x86 32/64, ARM 32/64) 环境下。
 
-### 实现原理
+以上。
+
+### 原理分析
 
 反编译 CoreFoundation 的 x86_64 版本可得到：[更可读](https://www.hopperapp.com)
 
