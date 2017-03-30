@@ -4,22 +4,29 @@ title: "libffi and __NSMakeSpecialForwardingCaptureBlock"
 ---
 
 ## 问题
-Q: Objective-C 中能否动态创建任意一个 block 对象？^注1
+
+在实现脚本语言与 native 代码交互时，可能会碰到这样一个问题：
+
+> Objective-C 中能否动态创建任意一个 block 对象？^注1
+
+需要的情形如：为了调用一个 API，其某个参数又是 block 类型。
 
 > 答案并不是简单的 `id block = ^{ ... };`，因为这种方式实际是静态的，编译完后这段代码只能生成一种 block，并不能生成各种参数与返回类型的其它 block。
 >
 > 注1: 不考虑 variadic functions（类似 printf) 的情形
 
-实际需要的类似：
+实际希望能有类似如下的函数：
 
 `id CreateBlock(int numOfArguments, int typeOfArguments[], int returnType, void (*functionPtr)());`
 
 `numOfArguments`, `typeOfArguments`, `returnType` 都是动态描述这个 block 的签名 signature，`functionPtr` 是一个 callback，用于执行真正的工作。返回的 id 是一个 block 对象，可强转(cast)成各种类型 的 block 使用。
 
 
-## 方案1
+## 方案1 使用 [libffi](https://github.com/libffi/libffi)
 
-动态的解析各种参数实际需要汇编级别操作各个寄存器，较复杂，简单起见可利用现成的 [libffi](https://github.com/libffi/libffi)，无完整 demo，主要代码如下：
+动态的解析各种参数实际需要汇编级别操作各个寄存器，较复杂。
+
+简单起见可利用现成的 libffi，[完整 demo](https://github.com/shyang/BlockFFI/blob/master/BlockFFI/main.m)，主要代码如下：
 
 ```objc
 // http://clang.llvm.org/docs/Block-ABI-Apple.html
@@ -36,36 +43,64 @@ static void SetBlockImplementation(id block, void *codePtr) {
 
 static void Callback(ffi_cif *cif, void *ret, void **args, void *user_data) {
     // 此处实现 callback 逻辑，所有 block 都会回调到这里
+    void *block = *(void **)args[0];
+    void *obj = *(void **)args[1];
+    NSUInteger idx = *(NSUInteger *)args[2];
+    BOOL *stop = *(BOOL **)args[3];
+    NSLog(@"callback: %@ %@ %u %p", block, obj, idx, stop);
 }
 
-id CreateBlock(...) {
-    // 根据输入参数，填充 libffi 所需要的 nargs, args 等等（略）
+int main(int argc, char * argv[]) {
+    // -[NSArray enumerateObjectsUsingBlock:] 的第一个参数是一个 block，其签名为：
+    // void (^)(id obj, NSUInteger idx, BOOL *stop)
+    // 实际加上隐含的第一个参数，它共需要 4 个参数，返回 void，Type string 为：v@?@Q^B
+    void *codePtr = NULL;
+    int nargs = 4;
+    void *user_data = NULL; // 可用于传递 self 等
 
-    void *codePtr;
-    int nargs;
-    void *user_data; // 可用于传递 self 等
-
-    ffi_closure *closure;
-    ffi_cif *cif; // call interface
-    ffi_type **args;
+    ffi_type **args = malloc(nargs * sizeof(*args));
     ffi_type *ret;
 
-    cif = malloc(sizeof(*cif));
-    ffi_prep_cif(cif, FFI_DEFAULT_ABI, nargs, ret, args);
+    // 按 v@?@Q^B 来填充结构体
+    args[0] = &ffi_type_pointer;
+    args[1] = &ffi_type_pointer;
+#if __LP64__
+    args[2] = &ffi_type_uint64;
+#else
+    args[2] = &ffi_type_uint32;
+#endif
+    args[3] = &ffi_type_pointer;
+    ret = &ffi_type_void;
 
-    closure = ffi_closure_alloc(sizeof(*closure), &codePtr);
-    ffi_prep_closure_loc(closure, cif, Callback, user_data, codePtr);
+    ffi_cif *cif = malloc(sizeof(*cif)); // call interface
+    ffi_status status = ffi_prep_cif(cif, FFI_DEFAULT_ABI, nargs, ret, args);
+    assert(status == FFI_OK);
+
+    ffi_closure *closure = ffi_closure_alloc(sizeof(*closure), &codePtr);
+    status = ffi_prep_closure_loc(closure, cif, Callback, user_data, codePtr);
+    assert(status == FFI_OK);
 
     id block = ^{
         assert(0); // should never reach here ^注1
 
         // pass some references into the block as upvalues
         // which will be removed when this block dealloc's
-        [aLocalObject anyMessage]; // ^注2
+        // [aLocalObject anyMessage]; // ^注2
     };
     SetBlockImplementation(block, codePtr); // ^注2
-    return block;
+
+    // 使用创建的 block
+    NSArray *arr = @[@"a", @"b", @"c"];
+    [arr enumerateObjectsUsingBlock:block];
 }
+```
+
+demo 运行没有 UI，其 Log 输出为
+
+```
+callback: <__NSGlobalBlock__: 0x100054250> a 0 0x16fdc39cf
+callback: <__NSGlobalBlock__: 0x100054250> b 1 0x16fdc39cf
+callback: <__NSGlobalBlock__: 0x100054250> c 2 0x16fdc39cf
 ```
 
 原理是：
@@ -78,8 +113,8 @@ id CreateBlock(...) {
 >
 > 注2: 虽然其原有代码不会被执行，但 retain 的逻辑编译器还是会处理，故可以利用这点将一些局部对象的生命周期绑定到这个 block 上。
 
-## 方案2
-使用 __NSMakeSpecialForwardingCaptureBlock，一个 CoreFoundation 中的私有函数：
+## 方案2 使用 `__NSMakeSpecialForwardingCaptureBlock`
+它是一个 `CoreFoundation` 中的私有函数：
 
 ```console
 $ nm /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation | grep NSMakeSpecialForwardingCaptureBlock
