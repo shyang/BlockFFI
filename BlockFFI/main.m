@@ -11,6 +11,8 @@
 
 #import <ffi/ffi.h>
 
+id __NSMakeSpecialForwardingCaptureBlock(const char *signature, void (^handler)(NSInvocation *inv));
+
 // http://clang.llvm.org/docs/Block-ABI-Apple.html
 struct Block {
     void *isa;
@@ -74,4 +76,16 @@ int main(int argc, char * argv[]) {
     // 使用创建的 block
     NSArray *arr = @[@"a", @"b", @"c"];
     [arr enumerateObjectsUsingBlock:block];
+
+    // another solution
+    id proxy = __NSMakeSpecialForwardingCaptureBlock("v@?@Q^B", ^(NSInvocation *inv) {
+        id obj = nil;
+        [inv getArgument:&obj atIndex:1];
+
+        NSUInteger idx = 0;
+        [inv getArgument:&idx atIndex:2];
+
+        NSLog(@"%@: obj %@, idx: %u", inv, obj, idx);
+    });
+    [arr enumerateObjectsUsingBlock:proxy];
 }
